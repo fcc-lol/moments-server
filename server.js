@@ -401,44 +401,58 @@ app.get("/share-preview/:momentId", (req, res) => {
       return res.status(404).send("Image not found");
     }
 
-    // Build description from available data
+    // Build title and description
+    const titleParts = [];
     const descriptionParts = [];
 
-    if (metadata.exifData?.DateTimeOriginal) {
-      const date = new Date(metadata.exifData.DateTimeOriginal);
-      descriptionParts.push(
-        date.toLocaleDateString("en-US", {
-          weekday: "long",
-          year: "numeric",
-          month: "long",
-          day: "numeric"
-        })
-      );
+    // Add location to title
+    if (metadata.locationData?.line1) {
+      titleParts.push(metadata.locationData.line1);
     }
 
-    // Use locationData structure (line1, line2, line3, line4)
+    // Add date to title
+    if (metadata.exifData?.DateTimeOriginal) {
+      const date = new Date(metadata.exifData.DateTimeOriginal);
+      const dateStr = date.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric"
+      });
+      titleParts.push(dateStr);
+    }
+
+    const title = titleParts.length > 0 ? titleParts.join(" · ") : "Moment";
+
+    // Build description with address and weather only
     if (metadata.locationData) {
-      const locationParts = [
+      const addressParts = [
         metadata.locationData.line1,
-        metadata.locationData.line3
+        metadata.locationData.line2,
+        metadata.locationData.line3,
+        metadata.locationData.line4
       ]
         .filter(Boolean)
         .join(", ");
-      if (locationParts) descriptionParts.push(locationParts);
+      if (addressParts) descriptionParts.push(addressParts);
     }
 
-    if (metadata.weatherData?.description) {
-      descriptionParts.push(metadata.weatherData.description);
+    if (metadata.weatherData) {
+      const weatherParts = [];
+      if (metadata.weatherData.description) {
+        weatherParts.push(metadata.weatherData.description);
+      }
+      if (metadata.weatherData.temperature !== undefined) {
+        weatherParts.push(`${Math.round(metadata.weatherData.temperature)}°`);
+      }
+      if (weatherParts.length > 0) {
+        descriptionParts.push(weatherParts.join(", "));
+      }
     }
 
     const description =
       descriptionParts.length > 0
-        ? descriptionParts.join(" • ")
-        : "A captured moment in time";
-
-    const title = metadata.locationData?.line1
-      ? `Moment at ${metadata.locationData.line1}`
-      : "A Moment";
+        ? descriptionParts.join(" · ")
+        : "A moment in time";
 
     const imageUrl = `https://moments-server.fcc.lol/moments/${momentId}/image`;
     const pageUrl = `https://moments.fcc.lol/${momentId}`;
