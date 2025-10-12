@@ -426,7 +426,6 @@ app.get("/share-preview/:momentId", (req, res) => {
     // Build description with address and weather only
     if (metadata.locationData) {
       const addressParts = [
-        metadata.locationData.line1,
         metadata.locationData.line2,
         metadata.locationData.line3,
         metadata.locationData.line4
@@ -445,7 +444,7 @@ app.get("/share-preview/:momentId", (req, res) => {
         weatherParts.push(`${Math.round(metadata.weatherData.temperature)}°`);
       }
       if (weatherParts.length > 0) {
-        descriptionParts.push(weatherParts.join(", "));
+        descriptionParts.push(weatherParts.join(" · "));
       }
     }
 
