@@ -416,17 +416,15 @@ app.get("/share-preview/:momentId", (req, res) => {
       );
     }
 
-    if (metadata.locationData?.formatted) {
-      descriptionParts.push(metadata.locationData.formatted);
-    } else if (metadata.locationData?.city || metadata.locationData?.state) {
-      const location = [
-        metadata.locationData.city,
-        metadata.locationData.state,
-        metadata.locationData.country
+    // Use locationData structure (line1, line2, line3, line4)
+    if (metadata.locationData) {
+      const locationParts = [
+        metadata.locationData.line1,
+        metadata.locationData.line3
       ]
         .filter(Boolean)
         .join(", ");
-      if (location) descriptionParts.push(location);
+      if (locationParts) descriptionParts.push(locationParts);
     }
 
     if (metadata.weatherData?.description) {
@@ -438,8 +436,8 @@ app.get("/share-preview/:momentId", (req, res) => {
         ? descriptionParts.join(" • ")
         : "A captured moment in time";
 
-    const title = metadata.locationData?.city
-      ? `Moment in ${metadata.locationData.city}`
+    const title = metadata.locationData?.line1
+      ? `Moment at ${metadata.locationData.line1}`
       : "A Moment";
 
     const imageUrl = `https://moments-server.fcc.lol/moments/${momentId}/image`;
