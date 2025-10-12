@@ -354,6 +354,176 @@ app.get("/moments/:momentId/image", (req, res) => {
   }
 });
 
+// Helper function to escape HTML special characters
+function escapeHtml(text) {
+  if (!text) return "";
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// Share preview endpoint - generates HTML with Open Graph tags for social media crawlers
+app.get("/share-preview/:momentId", (req, res) => {
+  const { momentId } = req.params;
+
+  const momentDir = path.join(__dirname, "moments", momentId);
+  const metadataPath = path.join(momentDir, "metadata.json");
+
+  // Check if moment exists
+  if (!fs.existsSync(metadataPath)) {
+    return res.status(404).send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Moment Not Found</title>
+          <meta property="og:title" content="Moment Not Found" />
+          <meta property="og:description" content="This moment could not be found." />
+        </head>
+        <body>
+          <h1>Moment Not Found</h1>
+        </body>
+      </html>
+    `);
+  }
+
+  try {
+    // Read metadata
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+
+    // Verify image file exists
+    const files = fs.readdirSync(momentDir);
+    const imageFile = files.find((file) => file.startsWith("image."));
+
+    if (!imageFile) {
+      return res.status(404).send("Image not found");
+    }
+
+    // Build description from available data
+    const descriptionParts = [];
+
+    if (metadata.exifData?.DateTimeOriginal) {
+      const date = new Date(metadata.exifData.DateTimeOriginal);
+      descriptionParts.push(
+        date.toLocaleDateString("en-US", {
+          weekday: "long",
+          year: "numeric",
+          month: "long",
+          day: "numeric"
+        })
+      );
+    }
+
+    if (metadata.locationData?.formatted) {
+      descriptionParts.push(metadata.locationData.formatted);
+    } else if (metadata.locationData?.city || metadata.locationData?.state) {
+      const location = [
+        metadata.locationData.city,
+        metadata.locationData.state,
+        metadata.locationData.country
+      ]
+        .filter(Boolean)
+        .join(", ");
+      if (location) descriptionParts.push(location);
+    }
+
+    if (metadata.weatherData?.description) {
+      descriptionParts.push(metadata.weatherData.description);
+    }
+
+    const description =
+      descriptionParts.length > 0
+        ? descriptionParts.join(" • ")
+        : "A captured moment in time";
+
+    const title = metadata.locationData?.city
+      ? `Moment in ${metadata.locationData.city}`
+      : "A Moment";
+
+    const imageUrl = `https://api.moments.fcc.lol/moments/${momentId}/image`;
+    const pageUrl = `https://moments.fcc.lol/${momentId}`;
+
+    // Escape HTML to prevent XSS
+    const escapedTitle = escapeHtml(title);
+    const escapedDescription = escapeHtml(description);
+
+    // Generate HTML with Open Graph meta tags
+    const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${escapedTitle}</title>
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="${pageUrl}" />
+    <meta property="og:title" content="${escapedTitle}" />
+    <meta property="og:description" content="${escapedDescription}" />
+    <meta property="og:image" content="${imageUrl}" />
+    <meta property="og:image:width" content="2400" />
+    <meta property="og:image:height" content="2400" />
+    <meta property="og:image:type" content="image/jpeg" />
+    
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="${pageUrl}" />
+    <meta name="twitter:title" content="${escapedTitle}" />
+    <meta name="twitter:description" content="${escapedDescription}" />
+    <meta name="twitter:image" content="${imageUrl}" />
+    
+    <!-- Redirect to actual app -->
+    <meta http-equiv="refresh" content="0;url=${pageUrl}" />
+    
+    <style>
+      body {
+        margin: 0;
+        padding: 20px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #111;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+      }
+      .container {
+        max-width: 600px;
+        text-align: center;
+      }
+      img {
+        max-width: 100%;
+        height: auto;
+        border-radius: 8px;
+      }
+      h1 {
+        margin-top: 20px;
+      }
+      p {
+        color: #888;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <img src="${imageUrl}" alt="${escapedTitle}" />
+      <h1>${escapedTitle}</h1>
+      <p>${escapedDescription}</p>
+      <p>Redirecting to moment...</p>
+    </div>
+  </body>
+</html>`;
+
+    res.set("Content-Type", "text/html");
+    res.send(html);
+  } catch (error) {
+    console.error("Error generating share preview:", error);
+    res.status(500).send("Error generating preview");
+  }
+});
+
 app.listen(port, () => {
   console.log(`Server is running at http://localhost:${port}`);
 });
