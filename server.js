@@ -442,7 +442,7 @@ app.get("/share-preview/:momentId", (req, res) => {
       ? `Moment in ${metadata.locationData.city}`
       : "A Moment";
 
-    const imageUrl = `https://api.moments.fcc.lol/moments/${momentId}/image`;
+    const imageUrl = `https://moments-server.fcc.lol/moments/${momentId}/image`;
     const pageUrl = `https://moments.fcc.lol/${momentId}`;
 
     // Escape HTML to prevent XSS
