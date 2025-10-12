@@ -1,6 +1,17 @@
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
+import multer from "multer";
+import { nanoid } from "nanoid";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import crypto from "crypto";
+import { geocodeLocation } from "./utils/geocode.js";
+import { findMomentByHash } from "./utils/moments.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = 3107;
@@ -40,6 +51,14 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
+// Configure multer for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024 // 50MB limit
+  }
+});
+
 // API Key validation endpoint
 app.post("/validate-api-key", (req, res) => {
   const { apiKey } = req.body;
@@ -64,9 +83,9 @@ app.post("/validate-api-key", (req, res) => {
   });
 });
 
-// Geocode location endpoint - gets location name from coordinates
-app.post("/geocode-location", async (req, res) => {
-  const { apiKey, lat, lng } = req.body;
+// Save moment endpoint - saves image and metadata to filesystem
+app.post("/save-moment", upload.single("image"), async (req, res) => {
+  const { apiKey } = req.body;
 
   // Validate FCC API key
   if (!apiKey || apiKey !== process.env.FCC_API_KEY) {
@@ -75,120 +94,226 @@ app.post("/geocode-location", async (req, res) => {
     });
   }
 
-  // Validate coordinates
-  if (!lat || !lng || typeof lat !== "number" || typeof lng !== "number") {
+  // Validate image file
+  if (!req.file) {
     return res.status(400).json({
-      error: "Invalid coordinates"
-    });
-  }
-
-  const googleApiKey = process.env.GOOGLE_MAPS_API_KEY;
-  if (!googleApiKey) {
-    return res.status(500).json({
-      error: "Google Maps API key not configured"
+      error: "No image file provided"
     });
   }
 
   try {
-    let businessName = null;
+    // Calculate file hash for duplicate detection
+    const calculatedHash = crypto
+      .createHash("sha256")
+      .update(req.file.buffer)
+      .digest("hex");
 
-    // Try to find a nearby business/POI first
-    const placesResponse = await fetch(
-      "https://places.googleapis.com/v1/places:searchNearby",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Goog-Api-Key": googleApiKey,
-          "X-Goog-FieldMask": "places.displayName"
-        },
-        body: JSON.stringify({
-          locationRestriction: {
-            circle: {
-              center: {
-                latitude: lat,
-                longitude: lng
-              },
-              radius: 50.0
-            }
-          },
-          maxResultCount: 1
-        })
+    // Create moments directory if it doesn't exist
+    const momentsDir = path.join(__dirname, "moments");
+    if (!fs.existsSync(momentsDir)) {
+      fs.mkdirSync(momentsDir, { recursive: true });
+    }
+
+    // Check for duplicate based on file hash
+    const existingMomentId = findMomentByHash(momentsDir, calculatedHash);
+    if (existingMomentId) {
+      // Verify that the moment directory and files actually exist
+      const existingMomentDir = path.join(momentsDir, existingMomentId);
+      const existingMetadataPath = path.join(
+        existingMomentDir,
+        "metadata.json"
+      );
+      const existingDirExists = fs.existsSync(existingMomentDir);
+      const existingMetadataExists = fs.existsSync(existingMetadataPath);
+
+      // Check if image file exists
+      let existingImageExists = false;
+      if (existingDirExists) {
+        const files = fs.readdirSync(existingMomentDir);
+        existingImageExists = files.some((file) => file.startsWith("image."));
       }
-    );
 
-    if (placesResponse.ok) {
-      const placesData = await placesResponse.json();
-      if (placesData.places && placesData.places.length > 0) {
-        const closestPlace = placesData.places[0];
-        businessName =
-          closestPlace.displayName?.text || closestPlace.displayName;
+      // Only treat as duplicate if all files exist
+      if (existingDirExists && existingMetadataExists && existingImageExists) {
+        // Read existing metadata to get location data
+        let existingLocationData = null;
+        try {
+          const existingMetadata = JSON.parse(
+            fs.readFileSync(existingMetadataPath, "utf8")
+          );
+          existingLocationData = existingMetadata.locationData || null;
+        } catch (e) {
+          console.warn("Failed to read existing metadata:", e);
+        }
+
+        return res.status(200).json({
+          duplicate: true,
+          momentId: existingMomentId,
+          locationData: existingLocationData,
+          message: "Moment already exists"
+        });
+      } else {
+        console.log(
+          `Found hash match for ${existingMomentId}, but files are missing. Creating new moment.`
+        );
       }
     }
 
-    // Get address components from Geocoding API
-    const geocodeResponse = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${googleApiKey}`
-    );
+    // Geocode location if coordinates are provided
+    let locationData = null;
+    if (req.body.lat && req.body.lng) {
+      try {
+        const lat = parseFloat(req.body.lat);
+        const lng = parseFloat(req.body.lng);
 
-    if (!geocodeResponse.ok) {
-      return res.status(500).json({
-        error: "Failed to fetch geocoding data"
-      });
+        if (!isNaN(lat) && !isNaN(lng)) {
+          locationData = await geocodeLocation(lat, lng);
+        }
+      } catch (error) {
+        console.warn("Failed to geocode location:", error.message);
+        // Continue without location data rather than failing
+      }
     }
 
-    const geocodeData = await geocodeResponse.json();
+    // Generate unique ID (12 characters, URL-safe)
+    const momentId = nanoid(12);
 
-    if (geocodeData.status !== "OK" || !geocodeData.results.length) {
-      return res.status(404).json({
-        error: "No location found"
-      });
-    }
+    // Create directory for this moment
+    const momentDir = path.join(momentsDir, momentId);
+    fs.mkdirSync(momentDir, { recursive: true });
 
-    const firstResult = geocodeData.results[0];
-    const components = firstResult.address_components;
+    // Save image file
+    const imageExtension = path.extname(req.file.originalname) || ".jpg";
+    const imagePath = path.join(momentDir, `image${imageExtension}`);
+    fs.writeFileSync(imagePath, req.file.buffer);
 
-    // Helper to get component value
-    const getComponent = (type) => {
-      const component = components.find((c) => c.types.includes(type));
-      return component?.long_name || "";
+    // Parse and save metadata
+    const metadata = {
+      id: momentId,
+      timestamp: new Date().toISOString(),
+      filename: req.file.originalname,
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+      fileHash: calculatedHash
     };
 
-    const getShortComponent = (type) => {
-      const component = components.find((c) => c.types.includes(type));
-      return component?.short_name || "";
-    };
+    // Add optional metadata fields if provided
+    if (req.body.exifData) {
+      try {
+        metadata.exifData = JSON.parse(req.body.exifData);
+      } catch (e) {
+        console.warn("Failed to parse exifData:", e);
+      }
+    }
 
-    // Build structured address
-    const streetNumber = getComponent("street_number");
-    const route = getComponent("route");
-    const street = [streetNumber, route].filter(Boolean).join(" ");
+    // Add geocoded location data if available
+    if (locationData) {
+      metadata.locationData = locationData;
+    }
 
-    // Try to get locality, with fallbacks
-    const locality =
-      getComponent("locality") ||
-      getComponent("sublocality") ||
-      getComponent("neighborhood") ||
-      getComponent("postal_town");
-    const state = getShortComponent("administrative_area_level_1");
-    const postalCode = getComponent("postal_code");
+    if (req.body.weatherData) {
+      try {
+        metadata.weatherData = JSON.parse(req.body.weatherData);
+      } catch (e) {
+        console.warn("Failed to parse weatherData:", e);
+      }
+    }
 
-    const cityStateParts = [locality, state].filter(Boolean).join(", ");
-    const cityLine = [cityStateParts, postalCode].filter(Boolean).join(" ");
+    if (req.body.dominantColor) {
+      metadata.dominantColor = req.body.dominantColor;
+    }
 
-    const country = getComponent("country");
+    if (req.body.textColor) {
+      metadata.textColor = req.body.textColor;
+    }
+
+    // Save metadata to JSON file
+    const metadataPath = path.join(momentDir, "metadata.json");
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+
+    console.log(`Moment saved: ${momentId}`);
 
     res.json({
-      line1: businessName || street || locality || "Location",
-      line2: businessName && street ? street : null,
-      line3: cityLine,
-      line4: country
+      success: true,
+      momentId,
+      locationData,
+      message: "Moment saved successfully"
     });
   } catch (error) {
-    console.error("Error geocoding location:", error);
+    console.error("Error saving moment:", error);
     res.status(500).json({
-      error: "Failed to geocode location"
+      error: "Failed to save moment",
+      details: error.message
     });
+  }
+});
+
+// Get all moment IDs endpoint - returns array of IDs (no API key required)
+app.get("/moments", (req, res) => {
+  const momentsDir = path.join(__dirname, "moments");
+
+  // Check if moments directory exists
+  if (!fs.existsSync(momentsDir)) {
+    return res.json({ momentIds: [] });
+  }
+
+  try {
+    // Read all directories in moments folder
+    const entries = fs.readdirSync(momentsDir, { withFileTypes: true });
+
+    // Filter for valid moment directories (must have metadata.json)
+    const momentIds = entries
+      .filter((entry) => {
+        if (!entry.isDirectory()) return false;
+        const metadataPath = path.join(momentsDir, entry.name, "metadata.json");
+        return fs.existsSync(metadataPath);
+      })
+      .map((entry) => entry.name);
+
+    res.json(momentIds);
+  } catch (error) {
+    console.error("Error reading moments:", error);
+    res.status(500).json({ error: "Error reading moments" });
+  }
+});
+
+// Get moment by ID endpoint - returns JSON (no API key required)
+app.get("/moments/:momentId", (req, res) => {
+  const { momentId } = req.params;
+
+  const momentDir = path.join(__dirname, "moments", momentId);
+  const metadataPath = path.join(momentDir, "metadata.json");
+
+  // Check if moment exists
+  if (!fs.existsSync(metadataPath)) {
+    return res.status(404).json({ error: "Moment not found" });
+  }
+
+  try {
+    // Read metadata
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+
+    // Find the image file
+    const files = fs.readdirSync(momentDir);
+    const imageFile = files.find((file) => file.startsWith("image."));
+
+    if (!imageFile) {
+      return res.status(404).json({ error: "Moment image not found" });
+    }
+
+    const imagePath = path.join(momentDir, imageFile);
+    const imageBuffer = fs.readFileSync(imagePath);
+    const imageBase64 = imageBuffer.toString("base64");
+    const imageMimeType = metadata.mimeType || "image/jpeg";
+
+    // Return metadata with base64 image
+    res.json({
+      ...metadata,
+      imageData: `data:${imageMimeType};base64,${imageBase64}`
+    });
+  } catch (error) {
+    console.error("Error loading moment:", error);
+    res.status(500).json({ error: "Error loading moment" });
   }
 });
 
