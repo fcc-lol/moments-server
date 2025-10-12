@@ -11,6 +11,10 @@ import sharp from "sharp";
 import exifr from "exifr";
 import { geocodeLocation, getTimezone } from "./utils/geocode.js";
 import { findMomentByHash } from "./utils/moments.js";
+import { extractDominantColor } from "./utils/colors.js";
+import { fetchWeatherData } from "./utils/weather.js";
+import { formatDateInTimezone } from "./utils/datetime.js";
+import { escapeHtml } from "./utils/html.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -191,11 +195,8 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
 
       // Fetch timezone
       try {
-        timezoneData = await getTimezone(
-          exifData.latitude,
-          exifData.longitude
-        );
-        
+        timezoneData = await getTimezone(exifData.latitude, exifData.longitude);
+
         // Convert DateTimeOriginal to local timezone if available
         if (exifData.DateTimeOriginal && timezoneData?.timeZoneId) {
           localDateTime = formatDateInTimezone(
@@ -422,189 +423,6 @@ app.get("/moments/:momentId/image", (req, res) => {
     res.status(500).json({ error: "Error loading image" });
   }
 });
-
-// Helper function to extract dominant color from image
-async function extractDominantColor(imageBuffer) {
-  try {
-    const { data, info } = await sharp(imageBuffer)
-      .resize(100, 100, { fit: "inside" })
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    let r = 0,
-      g = 0,
-      b = 0;
-    const pixelCount = info.width * info.height;
-
-    for (let i = 0; i < data.length; i += info.channels) {
-      r += data[i];
-      g += data[i + 1];
-      b += data[i + 2];
-    }
-
-    const avgColor = [
-      Math.round(r / pixelCount),
-      Math.round(g / pixelCount),
-      Math.round(b / pixelCount)
-    ];
-
-    // Helper function to calculate perceived brightness
-    const getBrightness = (rgb) => {
-      return (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000;
-    };
-
-    // Apply minimal brightening if needed
-    const brightness = getBrightness(avgColor);
-    let finalColor = avgColor;
-
-    if (brightness < 120) {
-      const factor = 120 / brightness;
-      finalColor = avgColor.map((c) => Math.min(255, Math.round(c * factor)));
-    } else if (brightness < 160) {
-      finalColor = avgColor.map((c) => Math.min(255, c + (255 - c) * 0.3));
-    }
-
-    // Create a brighter version for text
-    const textBrightness = getBrightness(finalColor);
-    let textColorRgb = finalColor;
-
-    if (textBrightness < 200) {
-      textColorRgb = finalColor.map((c) => Math.min(255, c + (255 - c) * 0.6));
-    }
-
-    return {
-      dominantColor: `rgb(${Math.round(finalColor[0])}, ${Math.round(
-        finalColor[1]
-      )}, ${Math.round(finalColor[2])})`,
-      textColor: `rgb(${Math.round(textColorRgb[0])}, ${Math.round(
-        textColorRgb[1]
-      )}, ${Math.round(textColorRgb[2])})`
-    };
-  } catch (error) {
-    console.warn("Failed to extract colors:", error);
-    return {
-      dominantColor: "rgb(200, 200, 200)",
-      textColor: "rgb(230, 230, 230)"
-    };
-  }
-}
-
-// Helper function to fetch weather data
-async function fetchWeatherData(lat, lng, dateTime) {
-  try {
-    const date = new Date(dateTime);
-    const dateStr = date.toISOString().split("T")[0];
-
-    const response = await fetch(
-      `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&start_date=${dateStr}&end_date=${dateStr}&hourly=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=auto`
-    );
-
-    if (!response.ok) return null;
-
-    const data = await response.json();
-
-    if (data.hourly?.time?.length > 0) {
-      const photoTime = date.getTime();
-      let closestIndex = 0;
-      let closestDiff = Math.abs(
-        new Date(data.hourly.time[0]).getTime() - photoTime
-      );
-
-      for (let i = 1; i < data.hourly.time.length; i++) {
-        const diff = Math.abs(
-          new Date(data.hourly.time[i]).getTime() - photoTime
-        );
-        if (diff < closestDiff) {
-          closestDiff = diff;
-          closestIndex = i;
-        }
-      }
-
-      const temperature = data.hourly.temperature_2m[closestIndex];
-      const weatherCode = data.hourly.weather_code[closestIndex];
-
-      const weatherDescriptions = {
-        0: "Clear sky",
-        1: "Mainly clear",
-        2: "Partly cloudy",
-        3: "Overcast",
-        45: "Foggy",
-        48: "Depositing rime fog",
-        51: "Light drizzle",
-        53: "Moderate drizzle",
-        55: "Dense drizzle",
-        56: "Light freezing drizzle",
-        57: "Dense freezing drizzle",
-        61: "Slight rain",
-        63: "Moderate rain",
-        65: "Heavy rain",
-        66: "Light freezing rain",
-        67: "Heavy freezing rain",
-        71: "Slight snow fall",
-        73: "Moderate snow fall",
-        75: "Heavy snow fall",
-        77: "Snow grains",
-        80: "Slight rain showers",
-        81: "Moderate rain showers",
-        82: "Violent rain showers",
-        85: "Slight snow showers",
-        86: "Heavy snow showers",
-        95: "Thunderstorm",
-        96: "Thunderstorm with slight hail",
-        99: "Thunderstorm with heavy hail"
-      };
-
-      return {
-        temperature: Math.round(temperature),
-        description: weatherDescriptions[weatherCode] || "Unknown conditions"
-      };
-    }
-
-    return null;
-  } catch (error) {
-    console.warn("Failed to fetch weather data:", error);
-    return null;
-  }
-}
-
-// Helper function to format date/time in a specific timezone
-function formatDateInTimezone(date, timeZoneId) {
-  if (!date || !timeZoneId) return null;
-
-  const dateObj = new Date(date);
-  
-  // Format the full date and time in the local timezone
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: timeZoneId,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false
-  });
-
-  const parts = formatter.formatToParts(dateObj);
-  const partsObj = {};
-  parts.forEach(part => {
-    partsObj[part.type] = part.value;
-  });
-
-  // Return ISO-like format in local timezone
-  return `${partsObj.year}-${partsObj.month}-${partsObj.day}T${partsObj.hour}:${partsObj.minute}:${partsObj.second}`;
-}
-
-// Helper function to escape HTML special characters
-function escapeHtml(text) {
-  if (!text) return "";
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
 
 // Share preview endpoint - generates HTML with Open Graph tags for social media crawlers
 app.get("/share-preview/:momentId", (req, res) => {
