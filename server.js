@@ -472,9 +472,6 @@ app.get("/share-preview/:momentId", (req, res) => {
     <meta name="twitter:description" content="${escapedDescription}" />
     <meta name="twitter:image" content="${imageUrl}" />
     
-    <!-- Redirect to actual app -->
-    <meta http-equiv="refresh" content="0;url=${pageUrl}" />
-    
     <style>
       body {
         margin: 0;
@@ -509,7 +506,7 @@ app.get("/share-preview/:momentId", (req, res) => {
       <img src="${imageUrl}" alt="${escapedTitle}" />
       <h1>${escapedTitle}</h1>
       <p>${escapedDescription}</p>
-      <p>Redirecting to moment...</p>
+      <p><a href="${pageUrl}" style="color: #fff;">View moment →</a></p>
     </div>
   </body>
 </html>`;
