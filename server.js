@@ -7,6 +7,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import sharp from "sharp";
 import { geocodeLocation } from "./utils/geocode.js";
 import { findMomentByHash } from "./utils/moments.js";
 
@@ -152,10 +153,6 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
           locationData: existingLocationData,
           message: "Moment already exists"
         });
-      } else {
-        console.log(
-          `Found hash match for ${existingMomentId}, but files are missing. Creating new moment.`
-        );
       }
     }
 
@@ -182,18 +179,32 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
     const momentDir = path.join(momentsDir, momentId);
     fs.mkdirSync(momentDir, { recursive: true });
 
-    // Save image file
-    const imageExtension = path.extname(req.file.originalname) || ".jpg";
-    const imagePath = path.join(momentDir, `image${imageExtension}`);
-    fs.writeFileSync(imagePath, req.file.buffer);
+    // Compress and save image file
+    const imagePath = path.join(momentDir, "image.jpeg");
+    await sharp(req.file.buffer)
+      .rotate() // Auto-rotate based on EXIF orientation
+      .resize(2400, 2400, {
+        fit: "inside",
+        withoutEnlargement: true
+      })
+      .jpeg({
+        quality: 85,
+        progressive: true,
+        mozjpeg: true
+      })
+      .toFile(imagePath);
+
+    // Get compressed image stats
+    const compressedStats = fs.statSync(imagePath);
 
     // Parse and save metadata
     const metadata = {
       id: momentId,
       timestamp: new Date().toISOString(),
       filename: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size,
+      mimeType: "image/jpeg", // Always JPEG after compression
+      originalSize: req.file.size,
+      size: compressedStats.size,
       fileHash: calculatedHash
     };
 
@@ -230,8 +241,6 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
     // Save metadata to JSON file
     const metadataPath = path.join(momentDir, "metadata.json");
     fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
-
-    console.log(`Moment saved: ${momentId}`);
 
     res.json({
       success: true,
@@ -293,7 +302,7 @@ app.get("/moments/:momentId", (req, res) => {
     // Read metadata
     const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
 
-    // Find the image file
+    // Verify image file exists
     const files = fs.readdirSync(momentDir);
     const imageFile = files.find((file) => file.startsWith("image."));
 
@@ -301,19 +310,47 @@ app.get("/moments/:momentId", (req, res) => {
       return res.status(404).json({ error: "Moment image not found" });
     }
 
-    const imagePath = path.join(momentDir, imageFile);
-    const imageBuffer = fs.readFileSync(imagePath);
-    const imageBase64 = imageBuffer.toString("base64");
-    const imageMimeType = metadata.mimeType || "image/jpeg";
-
-    // Return metadata with base64 image
+    // Return metadata with image URL
     res.json({
       ...metadata,
-      imageData: `data:${imageMimeType};base64,${imageBase64}`
+      imageUrl: `/moments/${momentId}/image`
     });
   } catch (error) {
     console.error("Error loading moment:", error);
     res.status(500).json({ error: "Error loading moment" });
+  }
+});
+
+// Get moment image endpoint - serves raw image file (no API key required)
+app.get("/moments/:momentId/image", (req, res) => {
+  const { momentId } = req.params;
+
+  const momentDir = path.join(__dirname, "moments", momentId);
+
+  // Check if moment directory exists
+  if (!fs.existsSync(momentDir)) {
+    return res.status(404).json({ error: "Moment not found" });
+  }
+
+  try {
+    // Find the image file
+    const files = fs.readdirSync(momentDir);
+    const imageFile = files.find((file) => file.startsWith("image."));
+
+    if (!imageFile) {
+      return res.status(404).json({ error: "Image not found" });
+    }
+
+    const imagePath = path.join(momentDir, imageFile);
+
+    // Send the file with proper caching headers
+    res.sendFile(imagePath, {
+      maxAge: 31536000000, // 1 year cache
+      immutable: true
+    });
+  } catch (error) {
+    console.error("Error loading image:", error);
+    res.status(500).json({ error: "Error loading image" });
   }
 });
 
