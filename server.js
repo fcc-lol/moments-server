@@ -8,6 +8,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
 import sharp from "sharp";
+import exifr from "exifr";
 import { geocodeLocation } from "./utils/geocode.js";
 import { findMomentByHash } from "./utils/moments.js";
 
@@ -115,6 +116,17 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
       fs.mkdirSync(momentsDir, { recursive: true });
     }
 
+    // Extract EXIF data from image
+    const exifData = await exifr.parse(req.file.buffer, {
+      tiff: true,
+      exif: true,
+      gps: true,
+      iptc: true
+    });
+
+    // Extract dominant colors
+    const colors = await extractDominantColor(req.file.buffer);
+
     // Check for duplicate based on file hash
     const existingMomentId = findMomentByHash(momentsDir, calculatedHash);
     if (existingMomentId) {
@@ -136,13 +148,12 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
 
       // Only treat as duplicate if all files exist
       if (existingDirExists && existingMetadataExists && existingImageExists) {
-        // Read existing metadata to get location data
-        let existingLocationData = null;
+        // Read existing metadata to return all necessary data
+        let existingMetadata = {};
         try {
-          const existingMetadata = JSON.parse(
+          existingMetadata = JSON.parse(
             fs.readFileSync(existingMetadataPath, "utf8")
           );
-          existingLocationData = existingMetadata.locationData || null;
         } catch (e) {
           console.warn("Failed to read existing metadata:", e);
         }
@@ -150,25 +161,41 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
         return res.status(200).json({
           duplicate: true,
           momentId: existingMomentId,
-          locationData: existingLocationData,
+          exifData: existingMetadata.exifData || null,
+          locationData: existingMetadata.locationData || null,
+          weatherData: existingMetadata.weatherData || null,
+          dominantColor: existingMetadata.dominantColor || colors.dominantColor,
+          textColor: existingMetadata.textColor || colors.textColor,
           message: "Moment already exists"
         });
       }
     }
 
-    // Geocode location if coordinates are provided
+    // Geocode location and fetch weather if GPS data available
     let locationData = null;
-    if (req.body.lat && req.body.lng) {
-      try {
-        const lat = parseFloat(req.body.lat);
-        const lng = parseFloat(req.body.lng);
+    let weatherData = null;
 
-        if (!isNaN(lat) && !isNaN(lng)) {
-          locationData = await geocodeLocation(lat, lng);
-        }
+    if (exifData?.latitude && exifData?.longitude) {
+      try {
+        locationData = await geocodeLocation(
+          exifData.latitude,
+          exifData.longitude
+        );
       } catch (error) {
         console.warn("Failed to geocode location:", error.message);
-        // Continue without location data rather than failing
+      }
+
+      // Fetch weather if we also have a date
+      if (exifData.DateTimeOriginal) {
+        try {
+          weatherData = await fetchWeatherData(
+            exifData.latitude,
+            exifData.longitude,
+            exifData.DateTimeOriginal
+          );
+        } catch (error) {
+          console.warn("Failed to fetch weather data:", error.message);
+        }
       }
     }
 
@@ -208,13 +235,21 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
       fileHash: calculatedHash
     };
 
-    // Add optional metadata fields if provided
-    if (req.body.exifData) {
-      try {
-        metadata.exifData = JSON.parse(req.body.exifData);
-      } catch (e) {
-        console.warn("Failed to parse exifData:", e);
-      }
+    // Add EXIF data if available
+    if (exifData) {
+      // Only include relevant EXIF fields
+      metadata.exifData = {
+        latitude: exifData.latitude,
+        longitude: exifData.longitude,
+        DateTimeOriginal: exifData.DateTimeOriginal,
+        Make: exifData.Make,
+        Model: exifData.Model,
+        LensModel: exifData.LensModel,
+        FNumber: exifData.FNumber,
+        ExposureTime: exifData.ExposureTime,
+        ISO: exifData.ISO,
+        FocalLength: exifData.FocalLength
+      };
     }
 
     // Add geocoded location data if available
@@ -222,21 +257,14 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
       metadata.locationData = locationData;
     }
 
-    if (req.body.weatherData) {
-      try {
-        metadata.weatherData = JSON.parse(req.body.weatherData);
-      } catch (e) {
-        console.warn("Failed to parse weatherData:", e);
-      }
+    // Add weather data if available
+    if (weatherData) {
+      metadata.weatherData = weatherData;
     }
 
-    if (req.body.dominantColor) {
-      metadata.dominantColor = req.body.dominantColor;
-    }
-
-    if (req.body.textColor) {
-      metadata.textColor = req.body.textColor;
-    }
+    // Add colors
+    metadata.dominantColor = colors.dominantColor;
+    metadata.textColor = colors.textColor;
 
     // Save metadata to JSON file
     const metadataPath = path.join(momentDir, "metadata.json");
@@ -245,7 +273,11 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
     res.json({
       success: true,
       momentId,
+      exifData: metadata.exifData || null,
       locationData,
+      weatherData,
+      dominantColor: colors.dominantColor,
+      textColor: colors.textColor,
       message: "Moment saved successfully"
     });
   } catch (error) {
@@ -353,6 +385,150 @@ app.get("/moments/:momentId/image", (req, res) => {
     res.status(500).json({ error: "Error loading image" });
   }
 });
+
+// Helper function to extract dominant color from image
+async function extractDominantColor(imageBuffer) {
+  try {
+    const { data, info } = await sharp(imageBuffer)
+      .resize(100, 100, { fit: "inside" })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    let r = 0,
+      g = 0,
+      b = 0;
+    const pixelCount = info.width * info.height;
+
+    for (let i = 0; i < data.length; i += info.channels) {
+      r += data[i];
+      g += data[i + 1];
+      b += data[i + 2];
+    }
+
+    const avgColor = [
+      Math.round(r / pixelCount),
+      Math.round(g / pixelCount),
+      Math.round(b / pixelCount)
+    ];
+
+    // Helper function to calculate perceived brightness
+    const getBrightness = (rgb) => {
+      return (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000;
+    };
+
+    // Apply minimal brightening if needed
+    const brightness = getBrightness(avgColor);
+    let finalColor = avgColor;
+
+    if (brightness < 120) {
+      const factor = 120 / brightness;
+      finalColor = avgColor.map((c) => Math.min(255, Math.round(c * factor)));
+    } else if (brightness < 160) {
+      finalColor = avgColor.map((c) => Math.min(255, c + (255 - c) * 0.3));
+    }
+
+    // Create a brighter version for text
+    const textBrightness = getBrightness(finalColor);
+    let textColorRgb = finalColor;
+
+    if (textBrightness < 200) {
+      textColorRgb = finalColor.map((c) => Math.min(255, c + (255 - c) * 0.6));
+    }
+
+    return {
+      dominantColor: `rgb(${Math.round(finalColor[0])}, ${Math.round(
+        finalColor[1]
+      )}, ${Math.round(finalColor[2])})`,
+      textColor: `rgb(${Math.round(textColorRgb[0])}, ${Math.round(
+        textColorRgb[1]
+      )}, ${Math.round(textColorRgb[2])})`
+    };
+  } catch (error) {
+    console.warn("Failed to extract colors:", error);
+    return {
+      dominantColor: "rgb(200, 200, 200)",
+      textColor: "rgb(230, 230, 230)"
+    };
+  }
+}
+
+// Helper function to fetch weather data
+async function fetchWeatherData(lat, lng, dateTime) {
+  try {
+    const date = new Date(dateTime);
+    const dateStr = date.toISOString().split("T")[0];
+
+    const response = await fetch(
+      `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&start_date=${dateStr}&end_date=${dateStr}&hourly=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=auto`
+    );
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+
+    if (data.hourly?.time?.length > 0) {
+      const photoTime = date.getTime();
+      let closestIndex = 0;
+      let closestDiff = Math.abs(
+        new Date(data.hourly.time[0]).getTime() - photoTime
+      );
+
+      for (let i = 1; i < data.hourly.time.length; i++) {
+        const diff = Math.abs(
+          new Date(data.hourly.time[i]).getTime() - photoTime
+        );
+        if (diff < closestDiff) {
+          closestDiff = diff;
+          closestIndex = i;
+        }
+      }
+
+      const temperature = data.hourly.temperature_2m[closestIndex];
+      const weatherCode = data.hourly.weather_code[closestIndex];
+
+      const weatherDescriptions = {
+        0: "Clear sky",
+        1: "Mainly clear",
+        2: "Partly cloudy",
+        3: "Overcast",
+        45: "Foggy",
+        48: "Depositing rime fog",
+        51: "Light drizzle",
+        53: "Moderate drizzle",
+        55: "Dense drizzle",
+        56: "Light freezing drizzle",
+        57: "Dense freezing drizzle",
+        61: "Slight rain",
+        63: "Moderate rain",
+        65: "Heavy rain",
+        66: "Light freezing rain",
+        67: "Heavy freezing rain",
+        71: "Slight snow fall",
+        73: "Moderate snow fall",
+        75: "Heavy snow fall",
+        77: "Snow grains",
+        80: "Slight rain showers",
+        81: "Moderate rain showers",
+        82: "Violent rain showers",
+        85: "Slight snow showers",
+        86: "Heavy snow showers",
+        95: "Thunderstorm",
+        96: "Thunderstorm with slight hail",
+        99: "Thunderstorm with heavy hail"
+      };
+
+      return {
+        temperature: Math.round(temperature),
+        description: weatherDescriptions[weatherCode] || "Unknown conditions"
+      };
+    }
+
+    return null;
+  } catch (error) {
+    console.warn("Failed to fetch weather data:", error);
+    return null;
+  }
+}
 
 // Helper function to escape HTML special characters
 function escapeHtml(text) {
