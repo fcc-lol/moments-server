@@ -13,7 +13,7 @@ import { geocodeLocation, getTimezone } from "./utils/geocode.js";
 import { findMomentByHash } from "./utils/moments.js";
 import { extractDominantColor } from "./utils/colors.js";
 import { fetchWeatherData } from "./utils/weather.js";
-import { formatDateInTimezone } from "./utils/datetime.js";
+import { formatDateInTimezone, exifDateToISO } from "./utils/datetime.js";
 import { escapeHtml } from "./utils/html.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -121,12 +121,38 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
     }
 
     // Extract EXIF data from image
+    // Use reviveValues: false to prevent automatic date parsing which applies timezone conversion
     const exifData = await exifr.parse(req.file.buffer, {
       tiff: true,
       exif: true,
       gps: true,
-      iptc: true
+      iptc: true,
+      reviveValues: false // Keep dates as strings to prevent timezone conversion
     });
+
+    // Convert DateTimeOriginal to ISO format without timezone conversion
+    if (exifData?.DateTimeOriginal) {
+      exifData.DateTimeOriginal = exifDateToISO(exifData.DateTimeOriginal);
+    }
+
+    // Manually convert GPS coordinates since reviveValues: false prevents automatic conversion
+    if (exifData?.GPSLatitude && exifData?.GPSLongitude) {
+      const convertDMSToDD = (dms, ref) => {
+        if (!Array.isArray(dms) || dms.length !== 3) return null;
+        let dd = dms[0] + dms[1] / 60 + dms[2] / 3600;
+        if (ref === "S" || ref === "W") dd = dd * -1;
+        return dd;
+      };
+
+      exifData.latitude = convertDMSToDD(
+        exifData.GPSLatitude,
+        exifData.GPSLatitudeRef
+      );
+      exifData.longitude = convertDMSToDD(
+        exifData.GPSLongitude,
+        exifData.GPSLongitudeRef
+      );
+    }
 
     // Extract dominant colors
     const colors = await extractDominantColor(req.file.buffer);
@@ -475,7 +501,8 @@ app.get("/share-preview/:momentId", (req, res) => {
       const dateStr = date.toLocaleDateString("en-US", {
         month: "short",
         day: "numeric",
-        year: "numeric"
+        year: "numeric",
+        timeZone: "UTC"
       });
       titleParts.push(dateStr);
     }
