@@ -9,7 +9,7 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import sharp from "sharp";
 import exifr from "exifr";
-import { geocodeLocation } from "./utils/geocode.js";
+import { geocodeLocation, getTimezone } from "./utils/geocode.js";
 import { findMomentByHash } from "./utils/moments.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -163,6 +163,8 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
           momentId: existingMomentId,
           exifData: existingMetadata.exifData || null,
           locationData: existingMetadata.locationData || null,
+          timezoneData: existingMetadata.timezoneData || null,
+          localDateTime: existingMetadata.localDateTime || null,
           weatherData: existingMetadata.weatherData || null,
           dominantColor: existingMetadata.dominantColor || colors.dominantColor,
           textColor: existingMetadata.textColor || colors.textColor,
@@ -174,6 +176,8 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
     // Geocode location and fetch weather if GPS data available
     let locationData = null;
     let weatherData = null;
+    let timezoneData = null;
+    let localDateTime = null;
 
     if (exifData?.latitude && exifData?.longitude) {
       try {
@@ -183,6 +187,24 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
         );
       } catch (error) {
         console.warn("Failed to geocode location:", error.message);
+      }
+
+      // Fetch timezone
+      try {
+        timezoneData = await getTimezone(
+          exifData.latitude,
+          exifData.longitude
+        );
+        
+        // Convert DateTimeOriginal to local timezone if available
+        if (exifData.DateTimeOriginal && timezoneData?.timeZoneId) {
+          localDateTime = formatDateInTimezone(
+            exifData.DateTimeOriginal,
+            timezoneData.timeZoneId
+          );
+        }
+      } catch (error) {
+        console.warn("Failed to fetch timezone:", error.message);
       }
 
       // Fetch weather if we also have a date
@@ -257,6 +279,19 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
       metadata.locationData = locationData;
     }
 
+    // Add timezone data if available
+    if (timezoneData) {
+      metadata.timezoneData = {
+        timeZoneId: timezoneData.timeZoneId,
+        timeZoneName: timezoneData.timeZoneName
+      };
+    }
+
+    // Add local datetime if available
+    if (localDateTime) {
+      metadata.localDateTime = localDateTime;
+    }
+
     // Add weather data if available
     if (weatherData) {
       metadata.weatherData = weatherData;
@@ -275,6 +310,8 @@ app.post("/save-moment", upload.single("image"), async (req, res) => {
       momentId,
       exifData: metadata.exifData || null,
       locationData,
+      timezoneData,
+      localDateTime,
       weatherData,
       dominantColor: colors.dominantColor,
       textColor: colors.textColor,
@@ -528,6 +565,34 @@ async function fetchWeatherData(lat, lng, dateTime) {
     console.warn("Failed to fetch weather data:", error);
     return null;
   }
+}
+
+// Helper function to format date/time in a specific timezone
+function formatDateInTimezone(date, timeZoneId) {
+  if (!date || !timeZoneId) return null;
+
+  const dateObj = new Date(date);
+  
+  // Format the full date and time in the local timezone
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timeZoneId,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  });
+
+  const parts = formatter.formatToParts(dateObj);
+  const partsObj = {};
+  parts.forEach(part => {
+    partsObj[part.type] = part.value;
+  });
+
+  // Return ISO-like format in local timezone
+  return `${partsObj.year}-${partsObj.month}-${partsObj.day}T${partsObj.hour}:${partsObj.minute}:${partsObj.second}`;
 }
 
 // Helper function to escape HTML special characters

@@ -95,3 +95,33 @@ export const geocodeLocation = async (lat, lng) => {
     line4: country
   };
 };
+
+// Helper function to get timezone for coordinates
+export const getTimezone = async (lat, lng) => {
+  const googleApiKey = process.env.GOOGLE_MAPS_API_KEY;
+  if (!googleApiKey) {
+    throw new Error("Google Maps API key not configured");
+  }
+
+  // Use current timestamp for timezone lookup
+  const timestamp = Math.floor(Date.now() / 1000);
+
+  const response = await fetch(
+    `https://maps.googleapis.com/maps/api/timezone/json?location=${lat},${lng}&timestamp=${timestamp}&key=${googleApiKey}`
+  );
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch timezone data");
+  }
+
+  const data = await response.json();
+
+  if (data.status !== "OK") {
+    throw new Error(`Timezone API error: ${data.status}`);
+  }
+
+  return {
+    timeZoneId: data.timeZoneId,
+    timeZoneName: data.timeZoneName
+  };
+};
