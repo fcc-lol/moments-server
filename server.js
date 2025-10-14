@@ -382,6 +382,56 @@ app.get("/moments", (req, res) => {
   }
 });
 
+// Update moment location endpoint - updates location name
+app.patch("/moments/:momentId/location", (req, res) => {
+  const { momentId } = req.params;
+  const { locationName, apiKey } = req.body;
+
+  // Validate FCC API key
+  if (!apiKey || apiKey !== process.env.FCC_API_KEY) {
+    return res.status(401).json({
+      error: "Invalid API key"
+    });
+  }
+
+  // Validate location name
+  if (!locationName || typeof locationName !== "string") {
+    return res.status(400).json({
+      error: "Invalid location name"
+    });
+  }
+
+  const momentDir = path.join(__dirname, "moments", momentId);
+  const metadataPath = path.join(momentDir, "metadata.json");
+
+  // Check if moment exists
+  if (!fs.existsSync(metadataPath)) {
+    return res.status(404).json({ error: "Moment not found" });
+  }
+
+  try {
+    // Read existing metadata
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+
+    // Update location name (line1)
+    if (!metadata.locationData) {
+      metadata.locationData = {};
+    }
+    metadata.locationData.line1 = locationName;
+
+    // Write updated metadata back to file
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+
+    res.json({
+      success: true,
+      locationData: metadata.locationData
+    });
+  } catch (error) {
+    console.error("Error updating location:", error);
+    res.status(500).json({ error: "Failed to update location" });
+  }
+});
+
 // Get moment by ID endpoint - returns JSON (no API key required)
 app.get("/moments/:momentId", (req, res) => {
   const { momentId } = req.params;
